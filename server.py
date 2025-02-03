@@ -1,6 +1,7 @@
 import configparser
 import json
 import os
+import platform
 
 from bottle import route, run, request, response, hook
 from gdal_interfaces import GDALTileInterface
@@ -158,9 +159,11 @@ def post_lookup():
     """
     return do_lookup(body_to_locations)
 
+server = 'gunicorn' if platform.system() != "Windows" else 'wsgiref'
+
 if os.path.isfile(CERT_FILE) and os.path.isfile(KEY_FILE):
     print('Using HTTPS')
-    run(host=HOST, port=PORT, server='gunicorn', workers=NUM_WORKERS, certfile=CERT_FILE, keyfile=KEY_FILE)
+    run(host=HOST, port=PORT, server=server, workers=NUM_WORKERS, certfile=CERT_FILE, keyfile=KEY_FILE)
 else:
     print('Using HTTP')
-    run(host=HOST, port=PORT, server='gunicorn', workers=NUM_WORKERS)
+    run(host=HOST, port=PORT, server=server, workers=NUM_WORKERS)

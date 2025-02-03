@@ -6,9 +6,12 @@ from os.path import isfile, join, getsize
 import json
 from rtree import index
 
+SEA_LEVEL = 0
+MIN_PLAUSIBLE_HEIGHT = -420  # The deepest area on earth, not covered with water, is deep water in mexico with 420m below sea level
+
 # Originally based on https://stackoverflow.com/questions/13439357/extract-point-from-raster-in-gdal
 class GDALInterface(object):
-    SEA_LEVEL = 0
+
     def __init__(self, tif_path):
         super(GDALInterface, self).__init__()
         self.tif_path = tif_path
@@ -166,10 +169,15 @@ class GDALTileInterface(object):
         if not nearest:
             raise Exception('Invalid latitude/longitude')
         else:
-            coords = nearest[0].object
+            for coords in nearest:
+                gdal_interface = self._open_gdal_interface(coords.object['file'])
+                v = int(gdal_interface.lookup(lat, lng))
 
-            gdal_interface = self._open_gdal_interface(coords['file'])
-            return int(gdal_interface.lookup(lat, lng))
+                if v > MIN_PLAUSIBLE_HEIGHT:
+                    return v
+
+            return None
+
 
     def _build_index(self):
         print('Building spatial index ...')
