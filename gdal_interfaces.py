@@ -8,27 +8,14 @@ from rtree import index
 
 SEA_LEVEL = 0
 MIN_PLAUSIBLE_HEIGHT = -420  # The deepest area on earth, not covered with water, is deep water in mexico with 420m below sea level
-
 # Originally based on https://stackoverflow.com/questions/13439357/extract-point-from-raster-in-gdal
-class GDALInterface(object):
 
+
+class GDALInterface(object):
     def __init__(self, tif_path):
         super(GDALInterface, self).__init__()
         self.tif_path = tif_path
-        self.loadMetadata()
 
-    def get_corner_coords(self):
-        ulx, xres, xskew, uly, yskew, yres = self.geo_transform
-        lrx = ulx + (self.src.RasterXSize * xres)
-        lry = uly + (self.src.RasterYSize * yres)
-        return {
-            'TOP_LEFT': (ulx, uly),
-            'TOP_RIGHT': (lrx, uly),
-            'BOTTOM_LEFT': (ulx, lry),
-            'BOTTOM_RIGHT': (lrx, lry),
-        }
-
-    def loadMetadata(self):
         # open the raster and its spatial reference
         self.src = gdal.Open(self.tif_path)
 
@@ -47,7 +34,16 @@ class GDALInterface(object):
         self.geo_transform_inv = (gt[0], gt[5] / dev, -gt[2] / dev,
                                   gt[3], -gt[4] / dev, gt[1] / dev)
 
-
+    def get_corner_coords(self):
+        ulx, xres, xskew, uly, yskew, yres = self.geo_transform
+        lrx = ulx + (self.src.RasterXSize * xres)
+        lry = uly + (self.src.RasterYSize * yres)
+        return {
+            'TOP_LEFT': (ulx, uly),
+            'TOP_RIGHT': (lrx, uly),
+            'BOTTOM_LEFT': (ulx, lry),
+            'BOTTOM_RIGHT': (lrx, lry),
+        }
 
     @lazy
     def points_array(self):
@@ -56,7 +52,6 @@ class GDALInterface(object):
 
     def print_statistics(self):
         print(self.src.GetRasterBand(1).GetStatistics(True, True))
-
 
     def lookup(self, lat, lon):
         try:
@@ -74,10 +69,10 @@ class GDALInterface(object):
             # look the value up
             v = self.points_array[ylin, xpix]
 
-            return v if v != -32768 else self.SEA_LEVEL
+            return v if v != -32768 else SEA_LEVEL
         except Exception as e:
             print(e)
-            return self.SEA_LEVEL
+            return SEA_LEVEL
 
     def close(self):
         self.src = None
@@ -87,6 +82,7 @@ class GDALInterface(object):
 
     def __exit__(self, type, value, traceback):
         self.close()
+
 
 class GDALTileInterface(object):
     def __init__(self, tiles_folder, summary_file, open_interfaces_size=5):
@@ -140,7 +136,7 @@ class GDALTileInterface(object):
             all_coords += [
                 {
                     'file': full_path,
-                    'coords': ( lmin,  # latitude min
+                    'coords': (lmin,  # latitude min
                                 lmax,  # latitude max
                                 lngmin,  # longitude min
                                 lngmax,  # longitude max

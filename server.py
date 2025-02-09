@@ -5,6 +5,7 @@ import platform
 
 from bottle import route, run, request, response, hook
 from gdal_interfaces import GDALTileInterface
+from LocationRequest import LocationRequest
 
 
 class InternalException(ValueError):
@@ -13,54 +14,75 @@ class InternalException(ValueError):
     """
     pass
 
+
+class ServerConfig:
+    def __init__(self, config_parser):
+        if 'server' not in config_parser.sections():
+            raise InternalException("Config file incomplete")
+
+        self.HOST = config_parser.get('server', 'host')
+        self.PORT = config_parser.getint('server', 'port')
+        self.NUM_WORKERS = config_parser.getint('server', 'workers')
+        self.URL_ENDPOINT = config_parser.get('server', 'endpoint')
+        self.ALWAYS_REBUILD_SUMMARY = config_parser.getboolean('server', 'always-rebuild-summary')
+        self.DEFAULT_DATASET = config_parser.get('server', 'default-dataset')
+        self.CERTS_FOLDER = config_parser.get('server', 'certs-folder')
+        self.CERT_FILE = '%s/cert.crt' % self.CERTS_FOLDER
+        self.KEY_FILE = '%s/cert.key' % self.CERTS_FOLDER
+
+
 print('Reading config file ...')
 parser = configparser.ConfigParser()
 parser.read('config.ini')
 
-HOST = parser.get('server', 'host')
-PORT = parser.getint('server', 'port')
-NUM_WORKERS = parser.getint('server', 'workers')
-DATA_FOLDER = parser.get('server', 'data-folder')
-OPEN_INTERFACES_SIZE = parser.getint('server', 'open-interfaces-size')
-URL_ENDPOINT = parser.get('server', 'endpoint')
-ALWAYS_REBUILD_SUMMARY = parser.getboolean('server', 'always-rebuild-summary')
-CERTS_FOLDER = parser.get('server', 'certs-folder')
-CERT_FILE = '%s/cert.crt' % CERTS_FOLDER
-KEY_FILE = '%s/cert.key' % CERTS_FOLDER
-
+CONFIGURATION = ServerConfig(parser)
 
 """
-Initialize a global interface. This can grow quite large, because it has a cache.
+Initialize a global interfaces. This can grow quite large, because it has a cache.
 """
-interface = GDALTileInterface(DATA_FOLDER, '%s/summary.json' % DATA_FOLDER, OPEN_INTERFACES_SIZE)
+interfaces = {}
+for ds in parser.sections():
+    if ds == "server":
+        continue
 
-if interface.has_summary_json() and not ALWAYS_REBUILD_SUMMARY:
-    print('Re-using existing summary JSON')
-    interface.read_summary_json()
-else:
-    print('Creating summary JSON ...')
-    interface.create_summary_json()
+    data_folder = parser.get(ds, "data-folder")
+    interfaces[ds] = GDALTileInterface(data_folder, '%s/summary.json' % data_folder,
+                                       parser.getint(ds, "open-interfaces-size"))
 
-def get_elevation(lat, lng):
+    if interfaces[ds].has_summary_json() and not CONFIGURATION.ALWAYS_REBUILD_SUMMARY:
+        print('Re-using existing summary JSON')
+        interfaces[ds].read_summary_json()
+    else:
+        print('Creating summary JSON ...')
+        interfaces[ds].create_summary_json()
+
+
+def get_elevation(location_request):
     """
     Get the elevation at point (lat,lng) using the currently opened interface
-    :param lat:
-    :param lng:
+    :param location_request:
     :return:
     """
-    try:
-        elevation = interface.lookup(lat, lng)
-    except:
+
+    def generateError(error):
         return {
-            'latitude': lat,
-            'longitude': lng,
-            'error': 'No such coordinate (%s, %s)' % (lat, lng)
+            'latitude': location_request.lat,
+            'longitude': location_request.lng,
+            'error': error
         }
 
+    try:
+        elevation_results = {}
+        for data_set in location_request.data_sets:
+            if data_set not in interfaces:
+                return generateError('No such dataset loaded (%s)' % data_set)
+            elevation_results[data_set] = interfaces[data_set].lookup(location_request.lat, location_request.lng)
+    except:
+        return generateError('No such coordinate (%s, %s)' % (location_request.lat, location_request.lng))
     return {
-        'latitude': lat,
-        'longitude': lng,
-        'elevation': elevation
+        'latitude': location_request.lat,
+        'longitude': location_request.lng,
+        'elevation_results': elevation_results
     }
 
 
@@ -83,7 +105,7 @@ def lat_lng_from_location(location_with_comma):
     """
     try:
         lat, lng = [float(i) for i in location_with_comma.split(',')]
-        return lat, lng
+        return LocationRequest(lat, lng)
     except:
         raise InternalException(json.dumps({'error': 'Bad parameter format "%s".' % location_with_comma}))
 
@@ -100,9 +122,9 @@ def query_to_locations():
     return [lat_lng_from_location(l) for l in locations.split('|')]
 
 
-def body_to_locations():
+def parse_body():
     """
-    Grab a list of locations from the body and turn them into [(lat,lng),(lat,lng),...]
+    Grab a list of locations from the body and turn them into LocationRequest objects
     :return:
     """
     try:
@@ -113,36 +135,41 @@ def body_to_locations():
     if not locations:
         raise InternalException(json.dumps({'error': '"Locations" is required in the body.'}))
 
-    latlng = []
-    for l in locations:
+    ret = []
+    for body_location in locations:
         try:
-            latlng += [ (l['latitude'],l['longitude']) ]
+            data_sets = [CONFIGURATION.DEFAULT_DATASET]
+            if 'datasets' in body_location:
+                if hasattr(body_location['datasets'], "__len__"):
+                    data_sets = body_location['datasets']
+            ret.append(LocationRequest(body_location['latitude'], body_location['longitude'], data_sets=data_sets))
         except KeyError:
-            raise InternalException(json.dumps({'error': '"%s" is not in a valid format.' % l}))
-
-    return latlng
+            raise InternalException(json.dumps({'error': '"%s" is not in a valid format.' % body_location}))
+    return ret
 
 
 def do_lookup(get_locations_func):
     """
-    Generic method which gets the locations in [(lat,lng),(lat,lng),...] format by calling get_locations_func
+    Generic method which gets the locations  by calling get_locations_func
     and returns an answer ready to go to the client.
     :return:
     """
     try:
         locations = get_locations_func()
-        return {'results': [get_elevation(lat, lng) for (lat, lng) in locations]}
+        return {'results': [get_elevation(location_request) for location_request in locations]}
     except InternalException as e:
         response.status = 400
         response.content_type = 'application/json'
         return e.args[0]
 
+
 # For CORS
-@route(URL_ENDPOINT, method=['OPTIONS'])
+@route(CONFIGURATION.URL_ENDPOINT, method=['OPTIONS'])
 def cors_handler():
     return {}
 
-@route(URL_ENDPOINT, method=['GET'])
+
+@route(CONFIGURATION.URL_ENDPOINT, method=['GET'])
 def get_lookup():
     """
     GET method. Uses query_to_locations.
@@ -151,19 +178,21 @@ def get_lookup():
     return do_lookup(query_to_locations)
 
 
-@route(URL_ENDPOINT, method=['POST'])
+@route(CONFIGURATION.URL_ENDPOINT, method=['POST'])
 def post_lookup():
     """
     GET method. Uses body_to_locations.
     :return:
     """
-    return do_lookup(body_to_locations)
+    return do_lookup(parse_body)
+
 
 server = 'gunicorn' if platform.system() != "Windows" else 'wsgiref'
 
-if os.path.isfile(CERT_FILE) and os.path.isfile(KEY_FILE):
+if os.path.isfile(CONFIGURATION.CERT_FILE) and os.path.isfile(CONFIGURATION.KEY_FILE):
     print('Using HTTPS')
-    run(host=HOST, port=PORT, server=server, workers=NUM_WORKERS, certfile=CERT_FILE, keyfile=KEY_FILE)
+    run(host=CONFIGURATION.HOST, port=CONFIGURATION.PORT, server=server, workers=CONFIGURATION.NUM_WORKERS,
+        certfile=CONFIGURATION.CERT_FILE, keyfile=CONFIGURATION.KEY_FILE)
 else:
     print('Using HTTP')
-    run(host=HOST, port=PORT, server=server, workers=NUM_WORKERS)
+    run(host=CONFIGURATION.HOST, port=CONFIGURATION.PORT, server=server, workers=CONFIGURATION.NUM_WORKERS)
