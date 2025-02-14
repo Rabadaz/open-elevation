@@ -100,11 +100,11 @@ def get_elevation(location_request):
                 if data_set not in interfaces:
                     return generateError('No such dataset loaded (%s)' % data_set)
                 elevation_results[data_set] = interfaces[data_set].lookup(location_request.lat, location_request.lng)
-                return {
-                    'latitude': location_request.lat,
-                    'longitude': location_request.lng,
-                    'elevation_results': elevation_results
-                }
+            return {
+                'latitude': location_request.lat,
+                'longitude': location_request.lng,
+                'elevation_results': elevation_results
+            }
         except:
             return generateError('No such coordinate (%s, %s)' % (location_request.lat, location_request.lng))
 
