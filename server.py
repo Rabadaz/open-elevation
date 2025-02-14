@@ -5,7 +5,8 @@ import platform
 
 from bottle import route, run, request, response, hook
 from gdal_interfaces import GDALTileInterface
-from LocationRequest import LocationRequest
+from delta_interface import DeltaInterface
+from location_request import LocationRequest
 
 
 class InternalException(ValueError):
@@ -23,7 +24,6 @@ class ServerConfig:
         self.HOST = config_parser.get('server', 'host')
         self.PORT = config_parser.getint('server', 'port')
         self.NUM_WORKERS = config_parser.getint('server', 'workers')
-        self.URL_ENDPOINT = config_parser.get('server', 'endpoint')
         self.ALWAYS_REBUILD_SUMMARY = config_parser.getboolean('server', 'always-rebuild-summary')
         self.DEFAULT_DATASET = config_parser.get('server', 'default-dataset')
         self.CERTS_FOLDER = config_parser.get('server', 'certs-folder')
@@ -37,6 +37,9 @@ parser.read('config.ini')
 
 CONFIGURATION = ServerConfig(parser)
 
+LOOKUP_URL = "/api/v1/lookup"
+DATASET_INFO_URL ="/api/v1/datasets"
+
 """
 Initialize a global interfaces. This can grow quite large, because it has a cache.
 """
@@ -45,16 +48,24 @@ for ds in parser.sections():
     if ds == "server":
         continue
 
-    data_folder = parser.get(ds, "data-folder")
-    interfaces[ds] = GDALTileInterface(data_folder, '%s/summary.json' % data_folder,
-                                       parser.getint(ds, "open-interfaces-size"))
+    if not parser.has_option(ds, 'mode') or parser.get(ds, 'mode') == 'standard':
 
-    if interfaces[ds].has_summary_json() and not CONFIGURATION.ALWAYS_REBUILD_SUMMARY:
-        print('Re-using existing summary JSON')
-        interfaces[ds].read_summary_json()
+        data_folder = parser.get(ds, "data-folder")
+        interfaces[ds] = GDALTileInterface(data_folder, '%s/summary.json' % data_folder, parser.getint(ds, "open-interfaces-size"))
+
+        if interfaces[ds].has_summary_json() and not CONFIGURATION.ALWAYS_REBUILD_SUMMARY:
+            print('Re-using existing summary JSON')
+            interfaces[ds].read_summary_json()
+        else:
+            print('Creating summary JSON ...')
+            interfaces[ds].create_summary_json()
+    elif parser.get(ds, 'mode') == 'delta':
+        min_elev = parser.getfloat(ds, 'minimum-elevation') if parser.has_option(ds, 'minimum-elevation') else None
+        interfaces[ds] = DeltaInterface(parser.get(ds, 'ds1'), parser.get(ds, 'ds2'), minimum_elevation=min_elev)
     else:
-        print('Creating summary JSON ...')
-        interfaces[ds].create_summary_json()
+       InternalException("Unknown Interface mode (%s)"%parser.get(ds, 'mode'))
+
+
 
 
 def get_elevation(location_request):
@@ -70,21 +81,32 @@ def get_elevation(location_request):
             'longitude': location_request.lng,
             'error': error
         }
+    # Support request and response format from legacy open-elevation
+    if location_request.legacy_mode:
+        try:
+            elevation = interfaces[CONFIGURATION.DEFAULT_DATASET].lookup(location_request.lat, location_request.lng)
 
-    try:
-        elevation_results = {}
-        for data_set in location_request.data_sets:
-            if data_set not in interfaces:
-                return generateError('No such dataset loaded (%s)' % data_set)
-            elevation_results[data_set] = interfaces[data_set].lookup(location_request.lat, location_request.lng)
-    except:
-        return generateError('No such coordinate (%s, %s)' % (location_request.lat, location_request.lng))
-    return {
-        'latitude': location_request.lat,
-        'longitude': location_request.lng,
-        'elevation_results': elevation_results
-    }
-
+            return {
+                'latitude': location_request.lat,
+                'longitude': location_request.lng,
+                'elevation': elevation
+            }
+        except:
+            return generateError('No such coordinate (%s, %s)' % (location_request.lat, location_request.lng))
+    else:
+        try:
+            elevation_results = {}
+            for data_set in location_request.data_sets:
+                if data_set not in interfaces:
+                    return generateError('No such dataset loaded (%s)' % data_set)
+                elevation_results[data_set] = interfaces[data_set].lookup(location_request.lat, location_request.lng)
+                return {
+                    'latitude': location_request.lat,
+                    'longitude': location_request.lng,
+                    'elevation_results': elevation_results
+                }
+        except:
+            return generateError('No such coordinate (%s, %s)' % (location_request.lat, location_request.lng))
 
 @hook('after_request')
 def enable_cors():
@@ -105,7 +127,7 @@ def lat_lng_from_location(location_with_comma):
     """
     try:
         lat, lng = [float(i) for i in location_with_comma.split(',')]
-        return LocationRequest(lat, lng)
+        return LocationRequest(lat, lng, legacy_mode=True)
     except:
         raise InternalException(json.dumps({'error': 'Bad parameter format "%s".' % location_with_comma}))
 
@@ -142,7 +164,10 @@ def parse_body():
             if 'datasets' in body_location:
                 if hasattr(body_location['datasets'], "__len__"):
                     data_sets = body_location['datasets']
-            ret.append(LocationRequest(body_location['latitude'], body_location['longitude'], data_sets=data_sets))
+                ret.append(LocationRequest(body_location['latitude'], body_location['longitude'], data_sets=data_sets, legacy_mode=False))
+            else:
+                ret.append(LocationRequest(body_location['latitude'], body_location['longitude'], legacy_mode=True))
+
         except KeyError:
             raise InternalException(json.dumps({'error': '"%s" is not in a valid format.' % body_location}))
     return ret
@@ -150,7 +175,8 @@ def parse_body():
 
 def do_lookup(get_locations_func):
     """
-    Generic method which gets the locations  by calling get_locations_func
+    Generic method which gets the locations
+     by calling get_locations_func
     and returns an answer ready to go to the client.
     :return:
     """
@@ -164,12 +190,15 @@ def do_lookup(get_locations_func):
 
 
 # For CORS
-@route(CONFIGURATION.URL_ENDPOINT, method=['OPTIONS'])
+@route(LOOKUP_URL, method=['OPTIONS'])
 def cors_handler():
     return {}
 
+@route(DATASET_INFO_URL, method=['OPTIONS'])
+def cors_handler():
+    return {}
 
-@route(CONFIGURATION.URL_ENDPOINT, method=['GET'])
+@route(LOOKUP_URL, method=['GET'])
 def get_lookup():
     """
     GET method. Uses query_to_locations.
@@ -178,13 +207,17 @@ def get_lookup():
     return do_lookup(query_to_locations)
 
 
-@route(CONFIGURATION.URL_ENDPOINT, method=['POST'])
+@route(LOOKUP_URL, method=['POST'])
 def post_lookup():
     """
     GET method. Uses body_to_locations.
     :return:
     """
     return do_lookup(parse_body)
+    
+@route(DATASET_INFO_URL, method=['GET'])
+def get_dataset():
+    return {'datasets':list(interfaces.keys())}
 
 
 server = 'gunicorn' if platform.system() != "Windows" else 'wsgiref'
