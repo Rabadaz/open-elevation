@@ -61,7 +61,7 @@ for ds in parser.sections():
             interfaces[ds].create_summary_json()
     elif parser.get(ds, 'mode') == 'delta':
         min_elev = parser.getfloat(ds, 'minimum-elevation') if parser.has_option(ds, 'minimum-elevation') else None
-        interfaces[ds] = DeltaInterface(parser.get(ds, 'ds1'), parser.get(ds, 'ds2'), minimum_elevation=min_elev)
+        interfaces[ds] = DeltaInterface(interfaces, parser.get(ds, 'ds1'), parser.get(ds, 'ds2'), minimum_elevation=min_elev)
     else:
        InternalException("Unknown Interface mode (%s)"%parser.get(ds, 'mode'))
 
